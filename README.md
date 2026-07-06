@@ -1,0 +1,2 @@
+# gitdocker
+for aws testing

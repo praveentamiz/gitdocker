@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline - LimsApi & Angular
 
 on:
   push:
@@ -7,70 +7,96 @@ on:
       - release/production-deployment
 
 jobs:
-  build-deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     env:
-      DOTNET_ROOT: /usr/share/dotnet
+      OUTPUT_ROOT: /home/ubuntu/build-output
+      NUGET_PACKAGES: /home/ubuntu/nuget-packages
       NODE_OPTIONS: "--openssl-legacy-provider"
+      DOCKER_IMAGE: myrepo/lims-app:latest
+      KUBECONFIG: ${{ secrets.KUBECONFIG }}
 
     steps:
-    - name: Checkout code
+    # -------------------------
+    # Checkout code
+    # -------------------------
+    - name: Checkout repository
       uses: actions/checkout@v3
 
-    # ===== DOTNET BACKEND =====
+    # -------------------------
+    # Setup .NET SDK
+    # -------------------------
     - name: Setup .NET SDK
       uses: actions/setup-dotnet@v3
       with:
         dotnet-version: '8.0.x'
 
-    - name: Restore .NET dependencies
-      run: dotnet restore ./LimsApi/LimsApi.csproj
+    # -------------------------
+    # Loop through .NET projects
+    # -------------------------
+    - name: Build .NET projects
+      run: |
+        projects=(
+          "Backend/msplusmapi/LimsApi.csproj"
+          "Backend/msplgatewayapi/Gateway.csproj"
+          "Backend/msplutilapi/Util.csproj"
+        )
+        mkdir -p $OUTPUT_ROOT
+        for proj in "${projects[@]}"; do
+          echo "🔹 Building $proj"
+          dotnet restore "$proj" --packages $NUGET_PACKAGES
+          dotnet build "$proj" --configuration Release
+          dotnet publish "$proj" --configuration Release --output "$OUTPUT_ROOT/$(basename $proj .csproj)"
+        done
 
-    - name: Build .NET backend
-      run: dotnet build ./LimsApi/LimsApi.csproj --configuration Release
-
-    - name: Publish .NET backend
-      run: dotnet publish ./LimsApi/LimsApi.csproj -c Release -o ./publish/backend
-
-    # ===== ANGULAR FRONTEND =====
+    # -------------------------
+    # Angular Frontend Build
+    # -------------------------
     - name: Setup Node.js
       uses: actions/setup-node@v3
       with:
         node-version: '18.x'
 
-    - name: Install Angular dependencies
-      working-directory: ./limsui
-      run: npm install --legacy-peer-deps
-
-    - name: Build Angular frontend
-      working-directory: ./limsui
-      run: npx ng build --configuration production
-
-    - name: Copy Angular dist to publish folder
+    - name: Build Angular projects
       run: |
-        mkdir -p ./publish/frontend
-        cp -r ./limsui/dist/* ./publish/frontend/
+        angular_projects=(
+          "Frontend/msplusmclient"
+          "Frontend/msplqmsclient"
+        )
+        for proj in "${angular_projects[@]}"; do
+          echo "🔹 Building $proj"
+          cd $proj
+          npm install --legacy-peer-deps
+          npx ng build --configuration production
+          mkdir -p $OUTPUT_ROOT/$(basename $proj)
+          cp -r dist/* $OUTPUT_ROOT/$(basename $proj)/
+          cd ../../
+        done
 
-    # ===== DOCKER IMAGE =====
+    # -------------------------
+    # Docker build & push
+    # -------------------------
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
     - name: Build Docker image
-      run: docker build -t myrepo/lims-app:latest .
+      run: docker build -t $DOCKER_IMAGE .
 
     - name: Push Docker image
-      uses: docker/build-push-action@v4
-      with:
-        context: .
-        push: true
-        tags: myrepo/lims-app:latest
+      run: docker push $DOCKER_IMAGE
 
-    # ===== KUBERNETES DEPLOY =====
+    # -------------------------
+    # Kubernetes Deployment
+    # -------------------------
     - name: Setup kubectl
       uses: azure/setup-kubectl@v3
       with:
         version: 'v1.30.0'
 
     - name: Deploy to Kubernetes
-      env:
-        KUBECONFIG: ${{ secrets.KUBECONFIG }}
       run: |
         kubectl apply -f k8s/deployment.yaml
         kubectl rollout status deployment/lims-app

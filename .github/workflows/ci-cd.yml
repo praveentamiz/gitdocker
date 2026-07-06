@@ -4,82 +4,73 @@ on:
   push:
     branches:
       - main
-      - release/*
+      - release/production-deployment
 
 jobs:
-  build-and-deploy:
+  build-deploy:
     runs-on: ubuntu-latest
+    env:
+      DOTNET_ROOT: /usr/share/dotnet
+      NODE_OPTIONS: "--openssl-legacy-provider"
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-      # ---------------- Build Backend ----------------
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v3
-        with:
-          dotnet-version: '8.0.x'
+    # ===== DOTNET BACKEND =====
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '8.0.x'
 
-      - name: Restore and build .NET API
-        run: |
-          dotnet restore ./Backend/LimsApi/LimsApi.csproj
-          dotnet build ./Backend/LimsApi/LimsApi.csproj --configuration Release
-          dotnet publish ./Backend/LimsApi/LimsApi.csproj -c Release -o ./publish/backend
+    - name: Restore .NET dependencies
+      run: dotnet restore ./LimsApi/LimsApi.csproj
 
-      # ---------------- Build Frontend ----------------
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '20'
+    - name: Build .NET backend
+      run: dotnet build ./LimsApi/LimsApi.csproj --configuration Release
 
-      - name: Install Angular dependencies
-        run: |
-          cd Frontend/limsui
-          npm install
-          npm run build -- --configuration production
-          cd ../..
+    - name: Publish .NET backend
+      run: dotnet publish ./LimsApi/LimsApi.csproj -c Release -o ./publish/backend
 
-      # ---------------- Docker ----------------
-      - name: Login to Docker Hub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+    # ===== ANGULAR FRONTEND =====
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18.x'
 
-      - name: Build backend Docker image
-        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/lims-api:latest ./publish/backend
+    - name: Install Angular dependencies
+      working-directory: ./limsui
+      run: npm install --legacy-peer-deps
 
-      - name: Build frontend Docker image
-        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/lims-ui:latest ./Frontend/limsui/dist
+    - name: Build Angular frontend
+      working-directory: ./limsui
+      run: npx ng build --configuration production
 
-      - name: Push Docker images
-        run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/lims-api:latest
-          docker push ${{ secrets.DOCKER_USERNAME }}/lims-ui:latest
+    - name: Copy Angular dist to publish folder
+      run: |
+        mkdir -p ./publish/frontend
+        cp -r ./limsui/dist/* ./publish/frontend/
 
-      # ---------------- Deploy to Kubernetes ----------------
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: 'v1.29.0'
+    # ===== DOCKER IMAGE =====
+    - name: Build Docker image
+      run: docker build -t myrepo/lims-app:latest .
 
-      - name: Deploy to Kubernetes
-        env:
-          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
-        run: |
-          mkdir -p $HOME/.kube
-          echo "$KUBE_CONFIG_DATA" | base64 --decode > $HOME/.kube/config
-          kubectl apply -f k8s/backend-deployment.yaml
-          kubectl apply -f k8s/frontend-deployment.yaml
+    - name: Push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: myrepo/lims-app:latest
 
-      # ---------------- Terraform (Optional) ----------------
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: '1.6.0'
+    # ===== KUBERNETES DEPLOY =====
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.30.0'
 
-      - name: Terraform init & apply
-        run: |
-          cd terraform
-          terraform init
-          terraform apply -auto-approve
+    - name: Deploy to Kubernetes
+      env:
+        KUBECONFIG: ${{ secrets.KUBECONFIG }}
+      run: |
+        kubectl apply -f k8s/deployment.yaml
+        kubectl rollout status deployment/lims-app

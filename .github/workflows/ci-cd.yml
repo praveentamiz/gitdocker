@@ -1,0 +1,85 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - release/*
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # ---------------- Build Backend ----------------
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore and build .NET API
+        run: |
+          dotnet restore ./Backend/LimsApi/LimsApi.csproj
+          dotnet build ./Backend/LimsApi/LimsApi.csproj --configuration Release
+          dotnet publish ./Backend/LimsApi/LimsApi.csproj -c Release -o ./publish/backend
+
+      # ---------------- Build Frontend ----------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+
+      - name: Install Angular dependencies
+        run: |
+          cd Frontend/limsui
+          npm install
+          npm run build -- --configuration production
+          cd ../..
+
+      # ---------------- Docker ----------------
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build backend Docker image
+        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/lims-api:latest ./publish/backend
+
+      - name: Build frontend Docker image
+        run: docker build -t ${{ secrets.DOCKER_USERNAME }}/lims-ui:latest ./Frontend/limsui/dist
+
+      - name: Push Docker images
+        run: |
+          docker push ${{ secrets.DOCKER_USERNAME }}/lims-api:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/lims-ui:latest
+
+      # ---------------- Deploy to Kubernetes ----------------
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.29.0'
+
+      - name: Deploy to Kubernetes
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          mkdir -p $HOME/.kube
+          echo "$KUBE_CONFIG_DATA" | base64 --decode > $HOME/.kube/config
+          kubectl apply -f k8s/backend-deployment.yaml
+          kubectl apply -f k8s/frontend-deployment.yaml
+
+      # ---------------- Terraform (Optional) ----------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.6.0'
+
+      - name: Terraform init & apply
+        run: |
+          cd terraform
+          terraform init
+          terraform apply -auto-approve
